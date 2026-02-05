@@ -16,6 +16,7 @@ export let data: Metadata = null;
 export let callbacks: MetadataCallbackOptions[] = [];
 export let electron = BooleanFlag.False;
 let consentStatus: ConsentState = null;
+let cookiesLogged = false;
 let defaultStatus: ConsentState = { source: ConsentSource.Default, ad_Storage: Constant.Denied, analytics_Storage: Constant.Denied };
 
 export function start(): void {
@@ -78,12 +79,6 @@ export function start(): void {
     metric.max(Metric.ColorDepth, Math.round(screen.colorDepth));
   }
 
-  // Read cookies specified in configuration
-  for (let key of config.cookies) {
-    let value = getCookie(key);
-    if (value) { set(key, value); }
-  }
-
   // Track consent config
   // If consent status is not already set, initialize it based on project configuration. Otherwise, use the existing consent status.
   if (consentStatus === null) {
@@ -93,6 +88,9 @@ export function start(): void {
       analytics_Storage: config.track ? Constant.Granted : Constant.Denied,
     };
   }
+
+  logCookies();
+
   const consent = getConsentData(consentStatus);
   trackConsent.config(consent);
   // Track ids using a cookie if configuration allows it
@@ -112,8 +110,21 @@ function userAgentData(): void {
   } else { dimension.log(Dimension.Platform, navigator.platform); }
 }
 
+function logCookies(): void {
+  // Only log cookies if both analytics_Storage and ad_Storage are granted, and we haven't already logged them
+  if (cookiesLogged || consentStatus?.analytics_Storage !== Constant.Granted || consentStatus?.ad_Storage !== Constant.Granted) { return; }
+  for (let key of config.cookies) {
+    let value = getCookie(key);
+    if (value) { set(key, value); }
+  }
+  cookiesLogged = true;
+}
+
 export function stop(): void {
   data = null;
+  // Reset cookiesLogged so cookies are re-logged on restart. Each session generates new metadata
+  // (sessionId, pageNum), and cookie values need to be recorded in the new session's data stream.
+  cookiesLogged = false;
   callbacks.forEach(cb => { cb.called = false; });
 }
 
@@ -145,10 +156,12 @@ export function consent(status = true): void {
   }
 
   consentv2({ source: ConsentSource.APIv1, ad_Storage: Constant.Granted, analytics_Storage: Constant.Granted });
-  trackConsent.consent();
 }
 
 export function consentv2(consentState: ConsentState = defaultStatus, source: number = ConsentSource.APIv2): void {
+  // Guard against calling consent API when Clarity hasn't started (e.g., due to GPC)
+  if (!core.active()) { return; }
+
   const updatedStatus = {
     source: consentState.source ?? source,
     ad_Storage: normalizeConsent(consentState.ad_Storage, consentStatus?.ad_Storage),
@@ -184,13 +197,14 @@ export function consentv2(consentState: ConsentState = defaultStatus, source: nu
     save();
   }
 
+  logCookies();
   trackConsent.trackConsentv2(consentData);
   trackConsent.consent();
 }
 
 function getConsentData(consentState: ConsentState): ConsentData {
   let consent: ConsentData = {
-    source: consentState.source ?? ConsentSource.Implicit,
+    source: consentState.source ?? ConsentSource.Unknown,
     ad_Storage: consentState.ad_Storage === Constant.Granted ? BooleanFlag.True : BooleanFlag.False,
     analytics_Storage: consentState.analytics_Storage === Constant.Granted ? BooleanFlag.True : BooleanFlag.False,
   };
@@ -204,11 +218,11 @@ function normalizeConsent(value: unknown, fallback: string = Constant.Denied): s
 
 export function clear(all: boolean = false): void {
   // Clear any stored information in the cookie that tracks session information so we can restart fresh the next time
-  setCookie(Constant.SessionKey, Constant.Empty, -Number.MAX_VALUE);
+  setCookie(Constant.SessionKey, Constant.Empty, 0);
 
   // Clear user cookie as well if all flag is set
   if (all) {
-    setCookie(Constant.CookieKey, Constant.Empty, -Number.MAX_VALUE);
+    setCookie(Constant.CookieKey, Constant.Empty, 0);
   }
 }
 

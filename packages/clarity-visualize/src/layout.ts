@@ -245,8 +245,17 @@ export class LayoutHelper {
     }
 
     public customElement = (event: DecodedLayout.CustomElementEvent): void => {
-        if (!this.state.window.customElements.get(event.data.name)) {
-            this.state.window.customElements.define(event.data.name, class extends (this.state.window as typeof window).HTMLElement {});
+        const tagName = event.data.name;
+        if (!this.state.window.customElements.get(tagName)) {
+            try {
+                // Use eval to create class in target window context (avoids ES5 transpilation issues)
+                const EmptyElement = (this.state.window as any).eval(
+                    '(class extends HTMLElement { constructor() { super(); } })'
+                );
+                this.state.window.customElements.define(tagName, EmptyElement);
+            } catch (e) {
+                console.error(`Failed to define custom element ${tagName}:`, e);
+            }
         }
     }
 
@@ -641,7 +650,7 @@ export class LayoutHelper {
                                 node.setAttribute(Constant.Hide, size);
                         }
                     } else {
-                        node.setAttribute(attribute, v);
+                        node.setAttribute(attribute, this.isSuspiciousAttribute(attribute, v) ? Constant.Empty : v);
                     }
                 } catch (ex) {
                     console.warn("Node: " + node + " | " + JSON.stringify(attributes));
@@ -669,6 +678,23 @@ export class LayoutHelper {
             node.setAttribute(Constant.AutoComplete, Constant.NewPassword);
         }
     }
+
+    private isSuspiciousAttribute(name: string, value: string): boolean {
+        // Block event handlers entirely
+        if (name.startsWith('on')) {
+            return true;
+        }
+        
+        // Check for JavaScript protocols and dangerous patterns
+        const dangerous = [
+            /^\s*javascript:/i,
+            /^\s*data:text\/html/i,
+            /^\s*vbscript:/i
+        ];
+        
+        return dangerous.some(pattern => pattern.test(value));
+    }
+
 
     private getMobileCustomStyle = (): string => {
         if(this.isMobile){
